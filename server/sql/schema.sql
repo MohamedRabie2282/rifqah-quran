@@ -1,0 +1,14 @@
+CREATE TYPE user_role AS ENUM ('SHEIKH','STUDENT','GUARDIAN');
+CREATE TYPE memorization_status AS ENUM ('ASSIGNED','IN_PROGRESS','SUBMITTED','APPROVED','NEEDS_REVIEW');
+CREATE TABLE users (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), full_name VARCHAR(120) NOT NULL, email VARCHAR(160) UNIQUE NOT NULL, password_hash TEXT NOT NULL, role user_role NOT NULL, created_at TIMESTAMPTZ DEFAULT now());
+CREATE TABLE surahs (number SMALLINT PRIMARY KEY, name_ar VARCHAR(80) NOT NULL, verses_count SMALLINT NOT NULL, revelation_order SMALLINT, revelation_place VARCHAR(10) CHECK (revelation_place IN ('مكية','مدنية')));
+CREATE TABLE students (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), user_id UUID UNIQUE REFERENCES users(id) ON DELETE CASCADE, sheikh_id UUID REFERENCES users(id), guardian_id UUID REFERENCES users(id), joined_at DATE DEFAULT CURRENT_DATE);
+CREATE TABLE memorizations (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), student_id UUID REFERENCES students(id) ON DELETE CASCADE, surah_number SMALLINT REFERENCES surahs(number), from_ayah SMALLINT NOT NULL, to_ayah SMALLINT NOT NULL, assigned_at DATE DEFAULT CURRENT_DATE, due_at DATE, completed_at DATE, status memorization_status DEFAULT 'ASSIGNED', notes TEXT);
+CREATE TABLE evaluations (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), memorization_id UUID REFERENCES memorizations(id) ON DELETE CASCADE, sheikh_id UUID REFERENCES users(id), score SMALLINT CHECK(score BETWEEN 0 AND 100), notes TEXT, evaluated_at TIMESTAMPTZ DEFAULT now());
+CREATE TABLE reviews (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), student_id UUID REFERENCES students(id) ON DELETE CASCADE, surah_number SMALLINT REFERENCES surahs(number), from_ayah SMALLINT, to_ayah SMALLINT, scheduled_for DATE NOT NULL, completed_at TIMESTAMPTZ, notes TEXT);
+CREATE TABLE notifications (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), user_id UUID REFERENCES users(id) ON DELETE CASCADE, title VARCHAR(180), body TEXT, type VARCHAR(40), read_at TIMESTAMPTZ, created_at TIMESTAMPTZ DEFAULT now());
+CREATE TABLE certificates (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), student_id UUID REFERENCES students(id), surah_number SMALLINT REFERENCES surahs(number), score SMALLINT, file_path TEXT, issued_at TIMESTAMPTZ DEFAULT now());
+CREATE TABLE reports (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), student_id UUID REFERENCES students(id), kind VARCHAR(20), period_start DATE, period_end DATE, payload JSONB, created_at TIMESTAMPTZ DEFAULT now());
+CREATE TABLE messages (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), sender_id UUID REFERENCES users(id), recipient_id UUID REFERENCES users(id), body TEXT NOT NULL, read_at TIMESTAMPTZ, created_at TIMESTAMPTZ DEFAULT now());
+CREATE INDEX memorizations_student_idx ON memorizations(student_id, status);
+CREATE INDEX notifications_user_idx ON notifications(user_id, created_at DESC);
