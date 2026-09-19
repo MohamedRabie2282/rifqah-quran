@@ -7,9 +7,89 @@ const clientUrl=process.env.CLIENT_URL||'http://localhost:5173';
 const app=express(),server=http.createServer(app),io=new Server(server,{cors:{origin:clientUrl}});
 const port=Number(process.env.PORT||4000),secret:jwt.Secret=process.env.JWT_SECRET||'dev-secret',expiry=(process.env.JWT_EXPIRES_IN||'7d') as jwt.SignOptions['expiresIn'];
 if(process.env.NODE_ENV==='production'&&!process.env.JWT_SECRET){console.error('JWT_SECRET must be set in production. Refusing to start with the insecure default.');process.exit(1)}
-const mailer=process.env.SMTP_HOST?nodemailer.createTransport({host:process.env.SMTP_HOST,port:Number(process.env.SMTP_PORT||587),auth:process.env.SMTP_USER?{user:process.env.SMTP_USER,pass:process.env.SMTP_PASS}:undefined}):null;
-const sendMail=async(to:string,subject:string,html:string)=>{if(mailer){try{await mailer.sendMail({from:process.env.SMTP_FROM||'no-reply@rifqah.local',to,subject,html})}catch(e){console.error('Failed to send email:',e)}}else{console.log(`[dev email] To: ${to} | ${subject}\n${html}`)}};
-type AuthRequest=Request&{user?:{id:string;role:string}};
+const sendMail = async (to:string, subject:string, html:string) => {
+  const apiKey = process.env.BREVO_API_KEY;
+  const fromEmail = process.env.SMTP_FROM;
+
+  if (!apiKey || !fromEmail) {
+    console.error('Brevo API configuration is missing');
+    return;
+  }
+
+  try {
+    const response = await fetch('https://api.brevo.com/v3/smtp/email', {
+      method: 'POST',
+      headers: {
+        accept: 'application/json',
+        'api-key': apiKey,
+        'content-type': 'application/json'
+      },
+      body: JSON.stringify({
+        sender: {
+          email: fromEmail
+        },
+        to: [
+          {
+            email: to
+          }
+        ],
+        subject,
+        htmlContent: html
+      })
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      console.error('Brevo email error:', response.status, errorText);
+      return;
+    }
+
+    console.log(`Email sent successfully to ${to}`);
+  } catch (e) {
+    console.error('Failed to send email:', e);
+  }
+};
+const apiKey = process.env.BREVO_API_KEY;
+const fromEmail = process.env.SMTP_FROM;
+
+if (!apiKey || !fromEmail) {
+    console.error('Brevo API configuration is missing');
+    return;
+  }
+
+  try {
+    const response = await fetch('https://api.brevo.com/v3/smtp/email', {
+      method: 'POST',
+      headers: {
+        accept: 'application/json',
+        'api-key': apiKey,
+        'content-type': 'application/json'
+      },
+      body: JSON.stringify({
+        sender: {
+          email: fromEmail
+        },
+        to: [
+          {
+            email: to
+          }
+        ],
+        subject,
+        htmlContent: html
+      })
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      console.error('Brevo email error:', response.status, errorText);
+      return;
+    }
+
+    console.log(`Email sent successfully to ${to}`);
+  } catch (e) {
+    console.error('Failed to send email:', e);
+  }
+};type AuthRequest=Request&{user?:{id:string;role:string}};
 const asyncRoute=(fn:(req:any,res:any,next:any)=>Promise<any>)=>(req:Request,res:Response,next:NextFunction)=>Promise.resolve(fn(req,res,next)).catch(next);
 const auth=(roles?:string[])=>(req:AuthRequest,res:Response,next:NextFunction)=>{try{const token=req.headers.authorization?.replace('Bearer ','');const user=jwt.verify(token||'',secret) as {id:string;role:string};if(roles&&!roles.includes(user.role))return res.status(403).json({message:'غير مصرح'});req.user=user;next()}catch{return res.status(401).json({message:'جلسة غير صالحة'})}};
 const valid=(req:Request,res:Response)=>{const r=validationResult(req);if(!r.isEmpty()){res.status(422).json({errors:r.array()});return false}return true};
