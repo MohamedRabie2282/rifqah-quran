@@ -1,13 +1,33 @@
 import 'dotenv/config';
-import http from 'node:http'; import fs from 'node:fs'; import path from 'node:path'; import crypto from 'node:crypto';
-import express,{NextFunction,Request,Response} from 'express'; import cors from 'cors'; import jwt from 'jsonwebtoken'; import bcrypt from 'bcryptjs'; import cron from 'node-cron'; import mongoose from 'mongoose'; import PDFDocument from 'pdfkit'; import {Server} from 'socket.io'; import {body,validationResult} from 'express-validator'; import nodemailer from 'nodemailer';
-import {Certificate,Evaluation,Memorization,Message,Notification,Review,Student,Surah,User} from './models.js';
+import http from 'node:http';
+import fs from 'node:fs';
+import path from 'node:path';
+import crypto from 'node:crypto';
+import express, { NextFunction, Request, Response } from 'express';
+import cors from 'cors';
+import jwt from 'jsonwebtoken';
+import bcrypt from 'bcryptjs';
+import cron from 'node-cron';
+import mongoose from 'mongoose';
+import PDFDocument from 'pdfkit';
+import { Server } from 'socket.io';
+import { body, validationResult } from 'express-validator';
+import { Certificate, Evaluation, Memorization, Message, Notification, Review, Student, Surah, User } from './models.js';
 
-const clientUrl=process.env.CLIENT_URL||'http://localhost:5173';
-const app=express(),server=http.createServer(app),io=new Server(server,{cors:{origin:clientUrl}});
-const port=Number(process.env.PORT||4000),secret:jwt.Secret=process.env.JWT_SECRET||'dev-secret',expiry=(process.env.JWT_EXPIRES_IN||'7d') as jwt.SignOptions['expiresIn'];
-if(process.env.NODE_ENV==='production'&&!process.env.JWT_SECRET){console.error('JWT_SECRET must be set in production. Refusing to start with the insecure default.');process.exit(1)}
-const sendMail = async (to:string, subject:string, html:string) => {
+const clientUrl = process.env.CLIENT_URL || 'http://localhost:5173';
+const app = express();
+const server = http.createServer(app);
+const io = new Server(server, { cors: { origin: clientUrl } });
+const port = Number(process.env.PORT || 4000);
+const secret: jwt.Secret = process.env.JWT_SECRET || 'dev-secret';
+const expiry = (process.env.JWT_EXPIRES_IN || '7d') as jwt.SignOptions['expiresIn'];
+
+if (process.env.NODE_ENV === 'production' && !process.env.JWT_SECRET) {
+  console.error('JWT_SECRET must be set in production. Refusing to start with the insecure default.');
+  process.exit(1);
+}
+
+const sendMail = async (to: string, subject: string, html: string) => {
   const apiKey = process.env.BREVO_API_KEY;
   const fromEmail = process.env.SMTP_FROM;
 
@@ -49,93 +69,1689 @@ const sendMail = async (to:string, subject:string, html:string) => {
     console.error('Failed to send email:', e);
   }
 };
-const apiKey = process.env.BREVO_API_KEY;
-const fromEmail = process.env.SMTP_FROM;
 
-if (!apiKey || !fromEmail) {
-    console.error('Brevo API configuration is missing');
-    return;
+type AuthRequest = Request & { user?: { id: string; role: string } };
+
+const asyncRoute =
+  (fn: (req: any, res: any, next: any) => Promise<any>) =>
+  (req: Request, res: Response, next: NextFunction) =>
+    Promise.resolve(fn(req, res, next)).catch(next);
+
+const auth =
+  (roles?: string[]) =>
+  (req: AuthRequest, res: Response, next: NextFunction) => {
+    try {
+      const token = req.headers.authorization?.replace('Bearer ', '');
+      const user = jwt.verify(token || '', secret) as { id: string; role: string };
+
+      if (roles && !roles.includes(user.role)) {
+        return res.status(403).json({ message: 'غير مصرح' });
+      }
+
+      req.user = user;
+      next();
+    } catch {
+      return res.status(401).json({ message: 'جلسة غير صالحة' });
+    }
+  };
+
+const valid = (req: Request, res: Response) => {
+  const r = validationResult(req);
+
+  if (!r.isEmpty()) {
+    res.status(422).json({ errors: r.array() });
+    return false;
   }
 
-  try {
-    const response = await fetch('https://api.brevo.com/v3/smtp/email', {
-      method: 'POST',
-      headers: {
-        accept: 'application/json',
-        'api-key': apiKey,
-        'content-type': 'application/json'
-      },
-      body: JSON.stringify({
-        sender: {
-          email: fromEmail
-        },
-        to: [
-          {
-            email: to
-          }
-        ],
-        subject,
-        htmlContent: html
-      })
-    });
+  return true;
+};
 
-    if (!response.ok) {
-      const errorText = await response.text();
-      console.error('Brevo email error:', response.status, errorText);
-      return;
+const notify = async (userId: string, title: string, body: string, type = 'GENERAL') => {
+  const n = await Notification.create({ userId, title, body, type });
+  io.to(userId).emit('notification', n);
+  return n;
+};
+
+const validId = (id: string) => mongoose.isValidObjectId(id);
+
+const checkAyahRange = async (
+  surahNumber: number,
+  fromAyah: number,
+  toAyah: number
+) => {
+  if (!Number.isFinite(surahNumber)) return 'يرجى اختيار سورة';
+
+  const surah = await Surah.findOne({ number: surahNumber }).lean();
+
+  if (!surah) return 'السورة غير موجودة';
+
+  if (
+    !Number.isFinite(fromAyah) ||
+    !Number.isFinite(toAyah) ||
+    fromAyah < 1 ||
+    toAyah < fromAyah ||
+    toAyah > surah.versesCount
+  ) {
+    return `سورة ${surah.nameAr} فيها ${surah.versesCount} آية فقط — تأكد إن النطاق بين ١ و ${surah.versesCount}`;
+  }
+
+  return null;
+};
+
+const attempts = new Map<string, { count: number; reset: number }>();
+
+const rateLimit =
+  (max: number, windowMs: number) =>
+  (req: Request, res: Response, next: NextFunction) => {
+    const key = `${req.ip}:${req.path}`;
+    const now = Date.now();
+    const rec = attempts.get(key);
+
+    if (!rec || now > rec.reset) {
+      attempts.set(key, { count: 1, reset: now + windowMs });
+      return next();
     }
 
-    console.log(`Email sent successfully to ${to}`);
-  } catch (e) {
-    console.error('Failed to send email:', e);
-  }
-};type AuthRequest=Request&{user?:{id:string;role:string}};
-const asyncRoute=(fn:(req:any,res:any,next:any)=>Promise<any>)=>(req:Request,res:Response,next:NextFunction)=>Promise.resolve(fn(req,res,next)).catch(next);
-const auth=(roles?:string[])=>(req:AuthRequest,res:Response,next:NextFunction)=>{try{const token=req.headers.authorization?.replace('Bearer ','');const user=jwt.verify(token||'',secret) as {id:string;role:string};if(roles&&!roles.includes(user.role))return res.status(403).json({message:'غير مصرح'});req.user=user;next()}catch{return res.status(401).json({message:'جلسة غير صالحة'})}};
-const valid=(req:Request,res:Response)=>{const r=validationResult(req);if(!r.isEmpty()){res.status(422).json({errors:r.array()});return false}return true};
-const notify=async(userId:string,title:string,body:string,type='GENERAL')=>{const n=await Notification.create({userId,title,body,type});io.to(userId).emit('notification',n);return n};
-const validId=(id:string)=>mongoose.isValidObjectId(id);
-const checkAyahRange=async(surahNumber:number,fromAyah:number,toAyah:number)=>{if(!Number.isFinite(surahNumber))return 'يرجى اختيار سورة';const surah=await Surah.findOne({number:surahNumber}).lean();if(!surah)return 'السورة غير موجودة';if(!Number.isFinite(fromAyah)||!Number.isFinite(toAyah)||fromAyah<1||toAyah<fromAyah||toAyah>surah.versesCount)return `سورة ${surah.nameAr} فيها ${surah.versesCount} آية فقط — تأكد إن النطاق بين ١ و ${surah.versesCount}`;return null};
-const attempts=new Map<string,{count:number;reset:number}>();
-const rateLimit=(max:number,windowMs:number)=>(req:Request,res:Response,next:NextFunction)=>{const key=`${req.ip}:${req.path}`,now=Date.now(),rec=attempts.get(key);if(!rec||now>rec.reset){attempts.set(key,{count:1,reset:now+windowMs});return next()}if(rec.count>=max)return res.status(429).json({message:'محاولات كثيرة جدًا، حاول مرة أخرى بعد قليل'});rec.count++;next()};
-setInterval(()=>{const now=Date.now();for(const[k,v]of attempts)if(now>v.reset)attempts.delete(k)},60000).unref();
-app.use((_q,res,next)=>{res.setHeader('X-Content-Type-Options','nosniff');res.setHeader('X-Frame-Options','DENY');res.setHeader('Referrer-Policy','no-referrer');next()});
-app.use(cors({origin:clientUrl}));app.use(express.json({limit:'200kb'}));app.use('/certificates',express.static(process.env.CERTIFICATE_STORAGE||'uploads/certificates'));
-io.on('connection',socket=>socket.on('identify',(id:string)=>socket.join(id)));
-app.get('/api/health',(_q,res)=>res.json({ok:true,database:mongoose.connection.readyState===1?'connected':'disconnected'}));
+    if (rec.count >= max) {
+      return res
+        .status(429)
+        .json({ message: 'محاولات كثيرة جدًا، حاول مرة أخرى بعد قليل' });
+    }
 
-app.post('/api/auth/register',rateLimit(10,15*60*1000),body('email').isEmail(),body('password').isLength({min:8}),body('role').isIn(['STUDENT','SHEIKH','GUARDIAN']),body('fullName').trim().notEmpty(),asyncRoute(async(req,res)=>{if(!valid(req,res))return;const {fullName,email,password,role,inviteCode}=req.body;if(role==='SHEIKH'&&process.env.SHEIKH_INVITE_CODE&&inviteCode!==process.env.SHEIKH_INVITE_CODE)return res.status(403).json({message:'رمز دعوة الشيخ غير صحيح'});if(await User.exists({email}))return res.status(409).json({message:'البريد مستخدم مسبقًا'});const user=await User.create({fullName,email,passwordHash:await bcrypt.hash(password,12),role});if(role==='STUDENT')await Student.create({userId:user._id});res.status(201).json({user:{id:user.id,fullName:user.fullName,email:user.email,role:user.role},token:jwt.sign({id:user.id,role:user.role},secret,{expiresIn:expiry})})}));
-app.post('/api/auth/login',rateLimit(10,15*60*1000),asyncRoute(async(req,res)=>{const user=await User.findOne({email:req.body.email?.toLowerCase()});if(!user||!(await bcrypt.compare(req.body.password||'',user.passwordHash)))return res.status(401).json({message:'بيانات الدخول غير صحيحة'});res.json({user:{id:user.id,fullName:user.fullName,role:user.role},token:jwt.sign({id:user.id,role:user.role},secret,{expiresIn:expiry})})}));
-app.post('/api/auth/forgot-password',rateLimit(5,15*60*1000),body('email').isEmail(),asyncRoute(async(req,res)=>{if(!valid(req,res))return;const user=await User.findOne({email:req.body.email.toLowerCase()});if(user){const rawToken=crypto.randomBytes(32).toString('hex');user.resetTokenHash=crypto.createHash('sha256').update(rawToken).digest('hex');user.resetTokenExpiry=new Date(Date.now()+60*60*1000);await user.save();const link=`${clientUrl}/?resetToken=${rawToken}`;await sendMail(user.email,'إعادة تعيين كلمة المرور — رِفقة القرآن',`<p>اضغط الرابط التالي خلال ساعة لإعادة تعيين كلمة المرور:</p><p><a href="${link}">${link}</a></p>`)}res.json({message:'إذا كان البريد مسجلاً لدينا، ستصلك رسالة تحتوي على رابط إعادة التعيين'})}));
-app.post('/api/auth/reset-password',rateLimit(10,15*60*1000),body('token').notEmpty(),body('password').isLength({min:8}),asyncRoute(async(req,res)=>{if(!valid(req,res))return;const tokenHash=crypto.createHash('sha256').update(req.body.token).digest('hex');const user=await User.findOne({resetTokenHash:tokenHash,resetTokenExpiry:{$gt:new Date()}});if(!user)return res.status(400).json({message:'رابط إعادة التعيين غير صالح أو منتهي الصلاحية'});user.passwordHash=await bcrypt.hash(req.body.password,12);user.resetTokenHash=undefined;user.resetTokenExpiry=undefined;await user.save();res.json({message:'تم تحديث كلمة المرور بنجاح'})}));
-app.get('/api/surahs',auth(),asyncRoute(async(_q,res)=>res.json(await Surah.find().sort('number').lean())));
-app.get('/api/students',auth(['SHEIKH']),asyncRoute(async(req:AuthRequest,res)=>{const students=await Student.find({sheikhId:req.user!.id}).populate('userId','fullName email').lean();const totals=await Memorization.aggregate([{$match:{studentId:{$in:students.map(s=>s._id)},status:'APPROVED'}},{$group:{_id:'$studentId',completed:{$sum:1}}}]);const map=new Map(totals.map(x=>[String(x._id),x.completed]));res.json(students.map(s=>({id:s._id,user:s.userId,completed:map.get(String(s._id))||0})))}));
-app.get('/api/students/unlinked',auth(['SHEIKH']),asyncRoute(async(_req,res)=>{const rows=await Student.find({sheikhId:{$exists:false}}).populate('userId','fullName email').lean();res.json(rows.filter(r=>r.userId).map(r=>({id:r._id,user:r.userId})))}));
-app.post('/api/students/:id/link',auth(['SHEIKH']),asyncRoute(async(req:AuthRequest,res)=>{if(!validId(req.params.id as string))return res.status(400).json({message:'معرف غير صالح'});const student=await Student.findById(req.params.id);if(!student)return res.status(404).json({message:'الطالب غير موجود'});if(student.sheikhId)return res.status(409).json({message:'الطالب مرتبط بشيخ آخر بالفعل'});student.sheikhId=req.user!.id as any;await student.save();await notify(String(student.userId),'تم الربط بشيخ','تم ربط حسابك بشيخ لمتابعة حفظك','LINK');res.json({id:student.id})}));
-app.post('/api/guardian/link',auth(['GUARDIAN']),body('studentEmail').isEmail(),asyncRoute(async(req:AuthRequest,res)=>{if(!valid(req,res))return;const user=await User.findOne({email:req.body.studentEmail.toLowerCase(),role:'STUDENT'});if(!user)return res.status(404).json({message:'لا يوجد طالب بهذا البريد'});const student=await Student.findOne({userId:user._id});if(!student)return res.status(404).json({message:'حساب الطالب غير مكتمل'});if(student.guardianId&&String(student.guardianId)!==req.user!.id)return res.status(409).json({message:'الطالب مرتبط بولي أمر آخر بالفعل'});student.guardianId=req.user!.id as any;await student.save();await notify(String(user._id),'ربط ولي أمر','تم ربط ولي أمر بحسابك','LINK');res.json({id:student.id,studentName:user.fullName})}));
-app.post('/api/memorizations',auth(['SHEIKH']),body('studentId').isMongoId(),asyncRoute(async(req:AuthRequest,res)=>{if(!valid(req,res))return;const {studentId,surahNumber,fromAyah,toAyah,dueAt}=req.body,student=await Student.findById(studentId);if(!student)return res.status(404).json({message:'الطالب غير موجود'});if(String(student.sheikhId)!==req.user!.id)return res.status(403).json({message:'الطالب غير مرتبط بحسابك'});const rangeError=await checkAyahRange(Number(surahNumber),Number(fromAyah),Number(toAyah));if(rangeError)return res.status(400).json({message:rangeError});const m=await Memorization.create({studentId,surahNumber,fromAyah,toAyah,dueAt});await notify(String(student.userId),'درس جديد','تم تعيين درس حفظ جديد لك','ASSIGNMENT');res.status(201).json(m)}));
-app.patch('/api/memorizations/:id/submit',auth(['STUDENT']),asyncRoute(async(req:AuthRequest,res)=>{if(!validId(req.params.id as string))return res.status(400).json({message:'معرف غير صالح'});const student=await Student.findOne({userId:req.user!.id});const m=await Memorization.findOne({_id:req.params.id as string,studentId:student?._id});if(!m)return res.status(404).json({message:'الدرس غير موجود'});m.status='SUBMITTED';m.completedAt=new Date();await m.save();res.json(m)}));
-app.post('/api/students/:id/unlink',auth(['SHEIKH']),asyncRoute(async(req:AuthRequest,res)=>{if(!validId(req.params.id as string))return res.status(400).json({message:'معرف غير صالح'});const student=await Student.findOne({_id:req.params.id as string,sheikhId:req.user!.id});if(!student)return res.status(404).json({message:'الطالب غير موجود'});student.sheikhId=undefined;await student.save();res.json({id:student.id})}));
-app.post('/api/reviews',auth(['SHEIKH']),body('studentId').isMongoId(),body('scheduledFor').notEmpty(),asyncRoute(async(req:AuthRequest,res)=>{if(!valid(req,res))return;const {studentId,surahNumber,fromAyah,toAyah,scheduledFor,notes}=req.body,student=await Student.findById(studentId);if(!student)return res.status(404).json({message:'الطالب غير موجود'});if(String(student.sheikhId)!==req.user!.id)return res.status(403).json({message:'الطالب غير مرتبط بحسابك'});const rangeError=await checkAyahRange(Number(surahNumber),Number(fromAyah),Number(toAyah));if(rangeError)return res.status(400).json({message:rangeError});const review=await Review.create({studentId,surahNumber,fromAyah,toAyah,scheduledFor:new Date(scheduledFor),notes});await notify(String(student.userId),'مراجعة مجدولة','تم جدولة مراجعة جديدة لك','REVIEW');res.status(201).json(review)}));
-app.post('/api/evaluations',auth(['SHEIKH']),body('memorizationId').isMongoId(),body('score').isInt({min:0,max:100}),asyncRoute(async(req:AuthRequest,res)=>{if(!valid(req,res))return;const {memorizationId,score,notes}=req.body,m=await Memorization.findById(memorizationId);if(!m)return res.status(404).json({message:'الدرس غير موجود'});const student=await Student.findById(m.studentId);if(!student||String(student.sheikhId)!==req.user!.id)return res.status(403).json({message:'الطالب غير مرتبط بحسابك'});const evaluation=await Evaluation.create({memorizationId,sheikhId:req.user!.id,score,notes});await Memorization.findByIdAndUpdate(memorizationId,{status:'APPROVED',completedAt:new Date()});await notify(String(student.userId),'نتيجة تقييم جديدة',`حصلت على ${score}/100 في تقييم الحفظ`,'EVALUATION');res.status(201).json(evaluation)}));
-app.get('/api/dashboard',auth(['STUDENT','GUARDIAN']),asyncRoute(async(req:AuthRequest,res)=>{const student=req.user!.role==='STUDENT'?await Student.findOne({userId:req.user!.id}):await resolveGuardianStudent(req.user!.id,req.query.studentId as string);if(!student)return res.json({});const [summary,reviews]=await Promise.all([Memorization.aggregate([{$match:{studentId:student._id}},{$lookup:{from:'evaluations',localField:'_id',foreignField:'memorizationId',as:'evaluation'}},{$unwind:{path:'$evaluation',preserveNullAndEmptyArrays:true}},{$group:{_id:null,completed:{$sum:{$cond:[{$eq:['$status','APPROVED']},1,0]}},score:{$avg:'$evaluation.score'}}}]),Review.find({studentId:student._id,completedAt:null}).sort('scheduledFor').limit(5).lean()]);res.json({summary:{completed:summary[0]?.completed||0,score:Math.round(summary[0]?.score||0)},reviews,studentName:(student as any).userId?.fullName})}));
-app.get('/api/reports/summary',auth(),asyncRoute(async(req:AuthRequest,res)=>{const role=req.user!.role;let students:any[]=[];if(role==='STUDENT')students=await Student.find({userId:req.user!.id});else if(role==='GUARDIAN')students=await Student.find({guardianId:req.user!.id});else students=await Student.find({sheikhId:req.user!.id});const ids=students.map(s=>s._id);if(!ids.length)return res.json({reviewRate:0,avgScore:0,completedSurahs:0});const [reviewAgg,scoreAgg,surahAgg]=await Promise.all([Review.aggregate([{$match:{studentId:{$in:ids}}},{$group:{_id:null,total:{$sum:1},done:{$sum:{$cond:[{$ne:['$completedAt',null]},1,0]}}}}]),Memorization.aggregate([{$match:{studentId:{$in:ids}}},{$lookup:{from:'evaluations',localField:'_id',foreignField:'memorizationId',as:'ev'}},{$unwind:'$ev'},{$group:{_id:null,avg:{$avg:'$ev.score'}}}]),Memorization.aggregate([{$match:{studentId:{$in:ids},status:'APPROVED'}},{$group:{_id:'$surahNumber'}}])]);const reviewRate=reviewAgg[0]?.total?Math.round((reviewAgg[0].done/reviewAgg[0].total)*100):0;const avgScore=scoreAgg[0]?Math.round(scoreAgg[0].avg):0;res.json({reviewRate,avgScore,completedSurahs:surahAgg.length})}));
-app.get('/api/reports/:studentId',auth(),asyncRoute(async(req:AuthRequest,res)=>{if(!validId(req.params.studentId as string))return res.status(400).json({message:'معرف غير صالح'});const student=await Student.findById(req.params.studentId as string);if(!student)return res.status(404).json({message:'الطالب غير موجود'});const me=req.user!.id,role=req.user!.role;const allowed=(role==='STUDENT'&&String(student.userId)===me)||(role==='SHEIKH'&&String(student.sheikhId)===me)||(role==='GUARDIAN'&&String(student.guardianId)===me);if(!allowed)return res.status(403).json({message:'غير مصرح'});const weekly=await Memorization.aggregate([{$match:{studentId:student._id,completedAt:{$ne:null}}},{$group:{_id:{$dateToString:{format:'%Y-%U',date:'$completedAt'}},ayat:{$sum:{$add:[{$subtract:['$toAyah','$fromAyah']},1]}}}},{$sort:{_id:1}}]);res.json({weekly:weekly.map(x=>({week:x._id,ayat:x.ayat}))})}));
-const authorizedContactIds=async(role:string,me:string)=>{if(role==='STUDENT'){const student=await Student.findOne({userId:me});const ids:string[]=[];if(student){if(student.sheikhId)ids.push(String(student.sheikhId));if(student.guardianId)ids.push(String(student.guardianId))}return ids}if(role==='SHEIKH')return(await Student.find({sheikhId:me})).map(s=>String(s.userId));return(await Student.find({guardianId:me})).map(s=>String(s.userId))};
-const resolveGuardianStudent=async(guardianId:string,requestedStudentId?:string)=>{const children=await Student.find({guardianId}).populate('userId','fullName').lean();if(!children.length)return null;if(requestedStudentId){const match=children.find(c=>String(c._id)===requestedStudentId);if(match)return match}return children[0]};
-app.get('/api/guardian/children',auth(['GUARDIAN']),asyncRoute(async(req:AuthRequest,res)=>{const children=await Student.find({guardianId:req.user!.id}).populate('userId','fullName email').lean();res.json(children.map(c=>({id:c._id,user:c.userId})))}));
-app.post('/api/messages',auth(),rateLimit(30,60*1000),body('recipientId').isMongoId(),body('body').trim().notEmpty().isLength({max:2000}),asyncRoute(async(req:AuthRequest,res)=>{if(!valid(req,res))return;const ids=await authorizedContactIds(req.user!.role,req.user!.id);if(!ids.includes(req.body.recipientId))return res.status(403).json({message:'لا يمكنك مراسلة هذا الحساب'});const message=await Message.create({senderId:req.user!.id,recipientId:req.body.recipientId,body:req.body.body});await notify(req.body.recipientId,'رسالة جديدة',req.body.body.slice(0,120),'MESSAGE');res.status(201).json(message)}));
-app.get('/api/notifications',auth(),asyncRoute(async(req:AuthRequest,res)=>res.json(await Notification.find({userId:req.user!.id}).sort('-createdAt').limit(30).lean())));
-app.patch('/api/notifications/:id/read',auth(),asyncRoute(async(req:AuthRequest,res)=>{if(!validId(req.params.id as string))return res.status(400).json({message:'معرف غير صالح'});const notification=await Notification.findOneAndUpdate({_id:req.params.id as string,userId:req.user!.id},{readAt:new Date()},{new:true});if(!notification)return res.status(404).json({message:'غير موجود'});res.json(notification)}));
-app.get('/api/memorizations/me',auth(['STUDENT','GUARDIAN']),asyncRoute(async(req:AuthRequest,res)=>{const student=req.user!.role==='STUDENT'?await Student.findOne({userId:req.user!.id}):await resolveGuardianStudent(req.user!.id,req.query.studentId as string);if(!student)return res.json([]);const [memos,reviews]=await Promise.all([Memorization.find({studentId:student._id}).sort('-createdAt').lean(),Review.find({studentId:student._id}).sort('-scheduledFor').lean()]);const surahNumbers=[...new Set([...memos.map(r=>r.surahNumber),...reviews.map(r=>r.surahNumber)])];const surahs=await Surah.find({number:{$in:surahNumbers}}).lean(),names=new Map(surahs.map(s=>[s.number,s.nameAr]));res.json([...memos.map(r=>({...r,kind:'MEMORIZATION',surahName:names.get(r.surahNumber)})),...reviews.map(r=>({...r,kind:'REVIEW',status:r.completedAt?'مكتملة':'مجدولة',surahName:names.get(r.surahNumber)}))])}));
-app.get('/api/memorizations',auth(['SHEIKH']),asyncRoute(async(req:AuthRequest,res)=>{const mine=await Student.find({sheikhId:req.user!.id}).populate('userId','fullName').lean();const nameMap=new Map(mine.map(s=>[String(s._id),(s.userId as any)?.fullName])),ids=mine.map(x=>x._id);const [memos,reviews]=await Promise.all([Memorization.find({studentId:{$in:ids}}).sort('-createdAt').lean(),Review.find({studentId:{$in:ids}}).sort('-scheduledFor').lean()]);const surahNumbers=[...new Set([...memos.map(r=>r.surahNumber),...reviews.map(r=>r.surahNumber)])];const surahs=await Surah.find({number:{$in:surahNumbers}}).lean(),surahNames=new Map(surahs.map(s=>[s.number,s.nameAr]));res.json([...memos.map(r=>({...r,kind:'MEMORIZATION',surahName:surahNames.get(r.surahNumber),studentName:nameMap.get(String(r.studentId))})),...reviews.map(r=>({...r,kind:'REVIEW',status:r.completedAt?'مكتملة':'مجدولة',surahName:surahNames.get(r.surahNumber),studentName:nameMap.get(String(r.studentId))}))])}));
-app.get('/api/evaluations',auth(),asyncRoute(async(req:AuthRequest,res)=>{const role=req.user!.role;if(role==='STUDENT'||role==='GUARDIAN'){const student=role==='STUDENT'?await Student.findOne({userId:req.user!.id}):await resolveGuardianStudent(req.user!.id,req.query.studentId as string);if(!student)return res.json([]);const memos=await Memorization.find({studentId:student._id}).distinct('_id');return res.json(await Evaluation.find({memorizationId:{$in:memos}}).sort('-evaluatedAt').lean())}const evals=await Evaluation.find({sheikhId:req.user!.id}).sort('-evaluatedAt').limit(100).lean();const memos=await Memorization.find({_id:{$in:evals.map(e=>e.memorizationId)}}).lean();const memoMap=new Map(memos.map(m=>[String(m._id),m]));const studentIds=[...new Set(memos.map(m=>String(m.studentId)))];const students=await Student.find({_id:{$in:studentIds}}).populate('userId','fullName').lean();const studentMap=new Map(students.map(s=>[String(s._id),(s.userId as any)?.fullName]));const surahs=await Surah.find({number:{$in:memos.map(m=>m.surahNumber)}}).lean(),surahNames=new Map(surahs.map(s=>[s.number,s.nameAr]));res.json(evals.map(e=>{const m=memoMap.get(String(e.memorizationId));return {...e,surahName:m?surahNames.get(m.surahNumber):undefined,studentName:m?studentMap.get(String(m.studentId)):undefined}}))}));
-app.get('/api/messages',auth(),asyncRoute(async(req:AuthRequest,res)=>{const me=req.user!.id,withId=req.query.with as string|undefined;const filter=withId&&validId(withId)?{$or:[{senderId:me,recipientId:withId},{senderId:withId,recipientId:me}]}:{$or:[{senderId:me},{recipientId:me}]};res.json(await Message.find(filter).sort('createdAt').limit(200).lean())}));
-app.get('/api/contacts',auth(),asyncRoute(async(req:AuthRequest,res)=>{const ids=await authorizedContactIds(req.user!.role,req.user!.id);const users=await User.find({_id:{$in:ids}}).select('fullName role email').lean();res.json(users)}));
-app.get('/api/certificates',auth(),asyncRoute(async(req:AuthRequest,res)=>{const student=req.user!.role==='GUARDIAN'?await resolveGuardianStudent(req.user!.id,req.query.studentId as string):await Student.findOne({userId:req.user!.id});if(!student)return res.json([]);res.json(await Certificate.find({studentId:student._id}).sort('-issuedAt').lean())}));
-app.post('/api/students',auth(['SHEIKH']),body('fullName').trim().notEmpty(),body('email').isEmail(),body('password').isLength({min:8}),asyncRoute(async(req:AuthRequest,res)=>{if(!valid(req,res))return;const {fullName,email,password}=req.body;if(await User.exists({email}))return res.status(409).json({message:'البريد مستخدم مسبقًا'});const user=await User.create({fullName,email,passwordHash:await bcrypt.hash(password,12),role:'STUDENT'});const student=await Student.create({userId:user._id,sheikhId:req.user!.id});res.status(201).json({id:student.id,user:{id:user.id,fullName:user.fullName,email:user.email}})}));
-app.post('/api/certificates/:memorizationId',auth(['SHEIKH']),asyncRoute(async(req:AuthRequest,res)=>{if(!validId(req.params.memorizationId as string))return res.status(400).json({message:'معرف غير صالح'});const m=await Memorization.findById(req.params.memorizationId as string);if(!m)return res.status(404).json({message:'الدرس غير موجود'});const [student,surah,evaluation]=await Promise.all([Student.findById(m.studentId).populate('userId','fullName'),Surah.findOne({number:m.surahNumber}),Evaluation.findOne({memorizationId:m._id}).sort('-evaluatedAt')]);if(!student||!surah)return res.status(404).json({message:'بيانات الشهادة غير مكتملة'});if(String(student.sheikhId)!==req.user!.id)return res.status(403).json({message:'الطالب غير مرتبط بحسابك'});const dir=process.env.CERTIFICATE_STORAGE||'uploads/certificates',file=`certificate-${m.id}.pdf`,doc=new PDFDocument({size:'A4',layout:'landscape',margin:55});fs.mkdirSync(dir,{recursive:true});doc.pipe(fs.createWriteStream(path.join(dir,file)));doc.rect(18,18,806,559).lineWidth(3).stroke('#D4AF37');doc.fillColor('#1A6B4F').fontSize(34).text('شهادة إنجاز',0,100,{align:'center'});doc.fillColor('#263c34').fontSize(19).text(`نشهد بأن الطالب/ة ${(student.userId as any).fullName}`,0,190,{align:'center'});doc.fontSize(16).text(`قد أتم حفظ ${surah.nameAr} بتقييم ${evaluation?.score||0}/100`,0,235,{align:'center'});doc.end();const certificate=await Certificate.create({studentId:student._id,surahNumber:surah.number,score:evaluation?.score,filePath:file});res.status(201).json({certificate,url:`/certificates/${file}`})}));
-app.post('/api/announcements',auth(['SHEIKH']),body('title').trim().notEmpty(),body('body').trim().notEmpty().isLength({max:1000}),asyncRoute(async(req:AuthRequest,res)=>{if(!valid(req,res))return;const students=await Student.find({sheikhId:req.user!.id});await Promise.all(students.map(s=>notify(String(s.userId),req.body.title,req.body.body,'ANNOUNCEMENT')));res.status(201).json({sent:students.length})}));
-cron.schedule('0 9 */3 * *',async()=>{const ids=await Review.find({completedAt:null,scheduledFor:{$lte:new Date()}}).distinct('studentId'),students=await Student.find({_id:{$in:ids}});await Promise.all(students.map(s=>notify(String(s.userId),'تذكير بالمراجعة','لديك مراجعة مستحقة اليوم','REVIEW_REMINDER')))});
-app.use((err:any,_q:Request,res:Response,_n:NextFunction)=>{console.error(err);res.status(500).json({message:'حدث خطأ غير متوقع'})});
-const uri=process.env.MONGODB_URI;if(!uri)throw new Error('MONGODB_URI is required.');mongoose.connect(uri).then(()=>server.listen(port,()=>console.log(`Rifqah API: http://localhost:${port}`))).catch(err=>{console.error('MongoDB connection failed:',err.message);process.exit(1)});
+    rec.count++;
+    next();
+  };
+
+setInterval(() => {
+  const now = Date.now();
+
+  for (const [k, v] of attempts) {
+    if (now > v.reset) attempts.delete(k);
+  }
+}, 60000).unref();
+
+app.use((_q, res, next) => {
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('X-Frame-Options', 'DENY');
+  res.setHeader('Referrer-Policy', 'no-referrer');
+  next();
+});
+
+app.use(cors({ origin: clientUrl }));
+app.use(express.json({ limit: '200kb' }));
+app.use(
+  '/certificates',
+  express.static(process.env.CERTIFICATE_STORAGE || 'uploads/certificates')
+);
+
+io.on('connection', (socket) =>
+  socket.on('identify', (id: string) => socket.join(id))
+);
+
+app.get('/api/health', (_q, res) =>
+  res.json({
+    ok: true,
+    database: mongoose.connection.readyState === 1 ? 'connected' : 'disconnected'
+  })
+);
+
+app.post(
+  '/api/auth/register',
+  rateLimit(10, 15 * 60 * 1000),
+  body('email').isEmail(),
+  body('password').isLength({ min: 8 }),
+  body('role').isIn(['STUDENT', 'SHEIKH', 'GUARDIAN']),
+  body('fullName').trim().notEmpty(),
+  asyncRoute(async (req, res) => {
+    if (!valid(req, res)) return;
+
+    const { fullName, email, password, role, inviteCode } = req.body;
+
+    if (
+      role === 'SHEIKH' &&
+      process.env.SHEIKH_INVITE_CODE &&
+      inviteCode !== process.env.SHEIKH_INVITE_CODE
+    ) {
+      return res.status(403).json({ message: 'رمز دعوة الشيخ غير صحيح' });
+    }
+
+    if (await User.exists({ email })) {
+      return res.status(409).json({ message: 'البريد مستخدم مسبقًا' });
+    }
+
+    const user = await User.create({
+      fullName,
+      email,
+      passwordHash: await bcrypt.hash(password, 12),
+      role
+    });
+
+    if (role === 'STUDENT') {
+      await Student.create({ userId: user._id });
+    }
+
+    res.status(201).json({
+      user: {
+        id: user.id,
+        fullName: user.fullName,
+        email: user.email,
+        role: user.role
+      },
+      token: jwt.sign(
+        { id: user.id, role: user.role },
+        secret,
+        { expiresIn: expiry }
+      )
+    });
+  })
+);
+
+app.post(
+  '/api/auth/login',
+  rateLimit(10, 15 * 60 * 1000),
+  asyncRoute(async (req, res) => {
+    const user = await User.findOne({
+      email: req.body.email?.toLowerCase()
+    });
+
+    if (
+      !user ||
+      !(await bcrypt.compare(req.body.password || '', user.passwordHash))
+    ) {
+      return res
+        .status(401)
+        .json({ message: 'بيانات الدخول غير صحيحة' });
+    }
+
+    res.json({
+      user: {
+        id: user.id,
+        fullName: user.fullName,
+        role: user.role
+      },
+      token: jwt.sign(
+        { id: user.id, role: user.role },
+        secret,
+        { expiresIn: expiry }
+      )
+    });
+  })
+);
+
+app.post(
+  '/api/auth/forgot-password',
+  rateLimit(5, 15 * 60 * 1000),
+  body('email').isEmail(),
+  asyncRoute(async (req, res) => {
+    if (!valid(req, res)) return;
+
+    const user = await User.findOne({
+      email: req.body.email.toLowerCase()
+    });
+
+    if (user) {
+      const rawToken = crypto.randomBytes(32).toString('hex');
+
+      user.resetTokenHash = crypto
+        .createHash('sha256')
+        .update(rawToken)
+        .digest('hex');
+
+      user.resetTokenExpiry = new Date(Date.now() + 60 * 60 * 1000);
+
+      await user.save();
+
+      const link = `${clientUrl}/?resetToken=${rawToken}`;
+
+      await sendMail(
+        user.email,
+        'إعادة تعيين كلمة المرور — رِفقة القرآن',
+        `<p>اضغط الرابط التالي خلال ساعة لإعادة تعيين كلمة المرور:</p>
+         <p><a href="${link}">${link}</a></p>`
+      );
+    }
+
+    res.json({
+      message:
+        'إذا كان البريد مسجلاً لدينا، ستصلك رسالة تحتوي على رابط إعادة التعيين'
+    });
+  })
+);
+
+app.post(
+  '/api/auth/reset-password',
+  rateLimit(10, 15 * 60 * 1000),
+  body('token').notEmpty(),
+  body('password').isLength({ min: 8 }),
+  asyncRoute(async (req, res) => {
+    if (!valid(req, res)) return;
+
+    const tokenHash = crypto
+      .createHash('sha256')
+      .update(req.body.token)
+      .digest('hex');
+
+    const user = await User.findOne({
+      resetTokenHash: tokenHash,
+      resetTokenExpiry: { $gt: new Date() }
+    });
+
+    if (!user) {
+      return res
+        .status(400)
+        .json({ message: 'رابط إعادة التعيين غير صالح أو منتهي الصلاحية' });
+    }
+
+    user.passwordHash = await bcrypt.hash(req.body.password, 12);
+    user.resetTokenHash = undefined;
+    user.resetTokenExpiry = undefined;
+
+    await user.save();
+
+    res.json({ message: 'تم تحديث كلمة المرور بنجاح' });
+  })
+);
+
+app.get(
+  '/api/surahs',
+  auth(),
+  asyncRoute(async (_q, res) =>
+    res.json(await Surah.find().sort('number').lean())
+  )
+);
+
+app.get(
+  '/api/students',
+  auth(['SHEIKH']),
+  asyncRoute(async (req: AuthRequest, res) => {
+    const students = await Student.find({
+      sheikhId: req.user!.id
+    })
+      .populate('userId', 'fullName email')
+      .lean();
+
+    const totals = await Memorization.aggregate([
+      {
+        $match: {
+          studentId: { $in: students.map((s) => s._id) },
+          status: 'APPROVED'
+        }
+      },
+      {
+        $group: {
+          _id: '$studentId',
+          completed: { $sum: 1 }
+        }
+      }
+    ]);
+
+    const map = new Map(
+      totals.map((x) => [String(x._id), x.completed])
+    );
+
+    res.json(
+      students.map((s) => ({
+        id: s._id,
+        user: s.userId,
+        completed: map.get(String(s._id)) || 0
+      }))
+    );
+  })
+);
+
+app.get(
+  '/api/students/unlinked',
+  auth(['SHEIKH']),
+  asyncRoute(async (_req, res) => {
+    const rows = await Student.find({
+      sheikhId: { $exists: false }
+    })
+      .populate('userId', 'fullName email')
+      .lean();
+
+    res.json(
+      rows
+        .filter((r) => r.userId)
+        .map((r) => ({
+          id: r._id,
+          user: r.userId
+        }))
+    );
+  })
+);
+
+app.post(
+  '/api/students/:id/link',
+  auth(['SHEIKH']),
+  asyncRoute(async (req: AuthRequest, res) => {
+    if (!validId(req.params.id as string)) {
+      return res.status(400).json({ message: 'معرف غير صالح' });
+    }
+
+    const student = await Student.findById(req.params.id);
+
+    if (!student) {
+      return res.status(404).json({ message: 'الطالب غير موجود' });
+    }
+
+    if (student.sheikhId) {
+      return res
+        .status(409)
+        .json({ message: 'الطالب مرتبط بشيخ آخر بالفعل' });
+    }
+
+    student.sheikhId = req.user!.id as any;
+    await student.save();
+
+    await notify(
+      String(student.userId),
+      'تم الربط بشيخ',
+      'تم ربط حسابك بشيخ لمتابعة حفظك',
+      'LINK'
+    );
+
+    res.json({ id: student.id });
+  })
+);
+
+app.post(
+  '/api/guardian/link',
+  auth(['GUARDIAN']),
+  body('studentEmail').isEmail(),
+  asyncRoute(async (req: AuthRequest, res) => {
+    if (!valid(req, res)) return;
+
+    const user = await User.findOne({
+      email: req.body.studentEmail.toLowerCase(),
+      role: 'STUDENT'
+    });
+
+    if (!user) {
+      return res.status(404).json({
+        message: 'لا يوجد طالب بهذا البريد'
+      });
+    }
+
+    const student = await Student.findOne({
+      userId: user._id
+    });
+
+    if (!student) {
+      return res.status(404).json({
+        message: 'حساب الطالب غير مكتمل'
+      });
+    }
+
+    if (
+      student.guardianId &&
+      String(student.guardianId) !== req.user!.id
+    ) {
+      return res.status(409).json({
+        message: 'الطالب مرتبط بولي أمر آخر بالفعل'
+      });
+    }
+
+    student.guardianId = req.user!.id as any;
+    await student.save();
+
+    await notify(
+      String(user._id),
+      'ربط ولي أمر',
+      'تم ربط ولي أمر بحسابك',
+      'LINK'
+    );
+
+    res.json({
+      id: student.id,
+      studentName: user.fullName
+    });
+  })
+);
+
+app.post(
+  '/api/memorizations',
+  auth(['SHEIKH']),
+  body('studentId').isMongoId(),
+  asyncRoute(async (req: AuthRequest, res) => {
+    if (!valid(req, res)) return;
+
+    const {
+      studentId,
+      surahNumber,
+      fromAyah,
+      toAyah,
+      dueAt
+    } = req.body;
+
+    const student = await Student.findById(studentId);
+
+    if (!student) {
+      return res.status(404).json({
+        message: 'الطالب غير موجود'
+      });
+    }
+
+    if (String(student.sheikhId) !== req.user!.id) {
+      return res.status(403).json({
+        message: 'الطالب غير مرتبط بحسابك'
+      });
+    }
+
+    const rangeError = await checkAyahRange(
+      Number(surahNumber),
+      Number(fromAyah),
+      Number(toAyah)
+    );
+
+    if (rangeError) {
+      return res.status(400).json({
+        message: rangeError
+      });
+    }
+
+    const m = await Memorization.create({
+      studentId,
+      surahNumber,
+      fromAyah,
+      toAyah,
+      dueAt
+    });
+
+    await notify(
+      String(student.userId),
+      'درس جديد',
+      'تم تعيين درس حفظ جديد لك',
+      'ASSIGNMENT'
+    );
+
+    res.status(201).json(m);
+  })
+);
+
+app.patch(
+  '/api/memorizations/:id/submit',
+  auth(['STUDENT']),
+  asyncRoute(async (req: AuthRequest, res) => {
+    if (!validId(req.params.id as string)) {
+      return res.status(400).json({
+        message: 'معرف غير صالح'
+      });
+    }
+
+    const student = await Student.findOne({
+      userId: req.user!.id
+    });
+
+    const m = await Memorization.findOne({
+      _id: req.params.id as string,
+      studentId: student?._id
+    });
+
+    if (!m) {
+      return res.status(404).json({
+        message: 'الدرس غير موجود'
+      });
+    }
+
+    m.status = 'SUBMITTED';
+    m.completedAt = new Date();
+
+    await m.save();
+
+    res.json(m);
+  })
+);
+
+app.post(
+  '/api/students/:id/unlink',
+  auth(['SHEIKH']),
+  asyncRoute(async (req: AuthRequest, res) => {
+    if (!validId(req.params.id as string)) {
+      return res.status(400).json({
+        message: 'معرف غير صالح'
+      });
+    }
+
+    const student = await Student.findOne({
+      _id: req.params.id as string,
+      sheikhId: req.user!.id
+    });
+
+    if (!student) {
+      return res.status(404).json({
+        message: 'الطالب غير موجود'
+      });
+    }
+
+    student.sheikhId = undefined;
+
+    await student.save();
+
+    res.json({ id: student.id });
+  })
+);
+
+app.post(
+  '/api/reviews',
+  auth(['SHEIKH']),
+  body('studentId').isMongoId(),
+  body('scheduledFor').notEmpty(),
+  asyncRoute(async (req: AuthRequest, res) => {
+    if (!valid(req, res)) return;
+
+    const {
+      studentId,
+      surahNumber,
+      fromAyah,
+      toAyah,
+      scheduledFor,
+      notes
+    } = req.body;
+
+    const student = await Student.findById(studentId);
+
+    if (!student) {
+      return res.status(404).json({
+        message: 'الطالب غير موجود'
+      });
+    }
+
+    if (String(student.sheikhId) !== req.user!.id) {
+      return res.status(403).json({
+        message: 'الطالب غير مرتبط بشيخ'
+      });
+    }
+
+    const rangeError = await checkAyahRange(
+      Number(surahNumber),
+      Number(fromAyah),
+      Number(toAyah)
+    );
+
+    if (rangeError) {
+      return res.status(400).json({
+        message: rangeError
+      });
+    }
+
+    const review = await Review.create({
+      studentId,
+      surahNumber,
+      fromAyah,
+      toAyah,
+      scheduledFor: new Date(scheduledFor),
+      notes
+    });
+
+    await notify(
+      String(student.userId),
+      'مراجعة مجدولة',
+      'تم جدولة مراجعة جديدة لك',
+      'REVIEW'
+    );
+
+    res.status(201).json(review);
+  })
+);
+
+app.post(
+  '/api/evaluations',
+  auth(['SHEIKH']),
+  body('memorizationId').isMongoId(),
+  body('score').isInt({ min: 0, max: 100 }),
+  asyncRoute(async (req: AuthRequest, res) => {
+    if (!valid(req, res)) return;
+
+    const {
+      memorizationId,
+      score,
+      notes
+    } = req.body;
+
+    const m = await Memorization.findById(memorizationId);
+
+    if (!m) {
+      return res.status(404).json({
+        message: 'الدرس غير موجود'
+      });
+    }
+
+    const student = await Student.findById(m.studentId);
+
+    if (
+      !student ||
+      String(student.sheikhId) !== req.user!.id
+    ) {
+      return res.status(403).json({
+        message: 'الطالب غير مرتبط بشيخ'
+      });
+    }
+
+    const evaluation = await Evaluation.create({
+      memorizationId,
+      sheikhId: req.user!.id,
+      score,
+      notes
+    });
+
+    await Memorization.findByIdAndUpdate(
+      memorizationId,
+      {
+        status: 'APPROVED',
+        completedAt: new Date()
+      }
+    );
+
+    await notify(
+      String(student.userId),
+      'نتيجة تقييم جديدة',
+      `حصلت على ${score}/100 في تقييم الحفظ`,
+      'EVALUATION'
+    );
+
+    res.status(201).json(evaluation);
+  })
+);
+
+app.get(
+  '/api/dashboard',
+  auth(['STUDENT', 'GUARDIAN']),
+  asyncRoute(async (req: AuthRequest, res) => {
+    const student =
+      req.user!.role === 'STUDENT'
+        ? await Student.findOne({
+            userId: req.user!.id
+          })
+        : await resolveGuardianStudent(
+            req.user!.id,
+            req.query.studentId as string
+          );
+
+    if (!student) return res.json({});
+
+    const [summary, reviews] = await Promise.all([
+      Memorization.aggregate([
+        {
+          $match: {
+            studentId: student._id
+          }
+        },
+        {
+          $lookup: {
+            from: 'evaluations',
+            localField: '_id',
+            foreignField: 'memorizationId',
+            as: 'evaluation'
+          }
+        },
+        {
+          $unwind: {
+            path: '$evaluation',
+            preserveNullAndEmptyArrays: true
+          }
+        },
+        {
+          $group: {
+            _id: null,
+            completed: {
+              $sum: {
+                $cond: [
+                  { $eq: ['$status', 'APPROVED'] },
+                  1,
+                  0
+                ]
+              }
+            },
+            score: {
+              $avg: '$evaluation.score'
+            }
+          }
+        }
+      ]),
+      Review.find({
+        studentId: student._id,
+        completedAt: null
+      })
+        .sort('scheduledFor')
+        .limit(5)
+        .lean()
+    ]);
+
+    res.json({
+      summary: {
+        completed: summary[0]?.completed || 0,
+        score: Math.round(summary[0]?.score || 0)
+      },
+      reviews,
+      studentName: (student as any).userId?.fullName
+    });
+  })
+);
+
+app.get(
+  '/api/reports/summary',
+  auth(),
+  asyncRoute(async (req: AuthRequest, res) => {
+    const role = req.user!.role;
+    let students: any[] = [];
+
+    if (role === 'STUDENT') {
+      students = await Student.find({
+        userId: req.user!.id
+      });
+    } else if (role === 'GUARDIAN') {
+      students = await Student.find({
+        guardianId: req.user!.id
+      });
+    } else {
+      students = await Student.find({
+        sheikhId: req.user!.id
+      });
+    }
+
+    const ids = students.map((s) => s._id);
+
+    if (!ids.length) {
+      return res.json({
+        reviewRate: 0,
+        avgScore: 0,
+        completedSurahs: 0
+      });
+    }
+
+    const [
+      reviewAgg,
+      scoreAgg,
+      surahAgg
+    ] = await Promise.all([
+      Review.aggregate([
+        {
+          $match: {
+            studentId: { $in: ids }
+          }
+        },
+        {
+          $group: {
+            _id: null,
+            total: { $sum: 1 },
+            done: {
+              $sum: {
+                $cond: [
+                  { $ne: ['$completedAt', null] },
+                  1,
+                  0
+                ]
+              }
+            }
+          }
+        }
+      ]),
+      Memorization.aggregate([
+        {
+          $match: {
+            studentId: { $in: ids }
+          }
+        },
+        {
+          $lookup: {
+            from: 'evaluations',
+            localField: '_id',
+            foreignField: 'memorizationId',
+            as: 'ev'
+          }
+        },
+        {
+          $unwind: '$ev'
+        },
+        {
+          $group: {
+            _id: null,
+            avg: { $avg: '$ev.score' }
+          }
+        }
+      ]),
+      Memorization.aggregate([
+        {
+          $match: {
+            studentId: { $in: ids },
+            status: 'APPROVED'
+          }
+        },
+        {
+          $group: {
+            _id: '$surahNumber'
+          }
+        }
+      ])
+    ]);
+
+    const reviewRate = reviewAgg[0]?.total
+      ? Math.round(
+          (reviewAgg[0].done / reviewAgg[0].total) * 100
+        )
+      : 0;
+
+    const avgScore = scoreAgg[0]
+      ? Math.round(scoreAgg[0].avg)
+      : 0;
+
+    res.json({
+      reviewRate,
+      avgScore,
+      completedSurahs: surahAgg.length
+    });
+  })
+);
+
+app.get(
+  '/api/reports/:studentId',
+  auth(),
+  asyncRoute(async (req: AuthRequest, res) => {
+    if (!validId(req.params.studentId as string)) {
+      return res.status(400).json({
+        message: 'معرف غير صالح'
+      });
+    }
+
+    const student = await Student.findById(
+      req.params.studentId as string
+    );
+
+    if (!student) {
+      return res.status(404).json({
+        message: 'الطالب غير موجود'
+      });
+    }
+
+    const me = req.user!.id;
+    const role = req.user!.role;
+
+    const allowed =
+      (role === 'STUDENT' &&
+        String(student.userId) === me) ||
+      (role === 'SHEIKH' &&
+        String(student.sheikhId) === me) ||
+      (role === 'GUARDIAN' &&
+        String(student.guardianId) === me);
+
+    if (!allowed) {
+      return res.status(403).json({
+        message: 'غير مصرح'
+      });
+    }
+
+    const weekly = await Memorization.aggregate([
+      {
+        $match: {
+          studentId: student._id,
+          completedAt: { $ne: null }
+        }
+      },
+      {
+        $group: {
+          _id: {
+            $dateToString: {
+              format: '%Y-%U',
+              date: '$completedAt'
+            }
+          },
+          ayat: {
+            $sum: {
+              $add: [
+                {
+                  $subtract: [
+                    '$toAyah',
+                    '$fromAyah'
+                  ]
+                },
+                1
+              ]
+            }
+          }
+        }
+      },
+      {
+        $sort: { _id: 1 }
+      }
+    ]);
+
+    res.json({
+      weekly: weekly.map((x) => ({
+        week: x._id,
+        ayat: x.ayat
+      }))
+    });
+  })
+);
+
+const authorizedContactIds = async (
+  role: string,
+  me: string
+) => {
+  if (role === 'STUDENT') {
+    const student = await Student.findOne({
+      userId: me
+    });
+
+    const ids: string[] = [];
+
+    if (student) {
+      if (student.sheikhId) {
+        ids.push(String(student.sheikhId));
+      }
+
+      if (student.guardianId) {
+        ids.push(String(student.guardianId));
+      }
+    }
+
+    return ids;
+  }
+
+  if (role === 'SHEIKH') {
+    return (await Student.find({
+      sheikhId: me
+    })).map((s) => String(s.userId));
+  }
+
+  return (await Student.find({
+    guardianId: me
+  })).map((s) => String(s.userId));
+};
+
+const resolveGuardianStudent = async (
+  guardianId: string,
+  requestedStudentId?: string
+) => {
+  const children = await Student.find({
+    guardianId
+  })
+    .populate('userId', 'fullName')
+    .lean();
+
+  if (!children.length) return null;
+
+  if (requestedStudentId) {
+    const match = children.find(
+      (c) => String(c._id) === requestedStudentId
+    );
+
+    if (match) return match;
+  }
+
+  return children[0];
+};
+
+app.get(
+  '/api/guardian/children',
+  auth(['GUARDIAN']),
+  asyncRoute(async (req: AuthRequest, res) => {
+    const children = await Student.find({
+      guardianId: req.user!.id
+    })
+      .populate('userId', 'fullName email')
+      .lean();
+
+    res.json(
+      children.map((c) => ({
+        id: c._id,
+        user: c.userId
+      }))
+    );
+  })
+);
+
+app.post(
+  '/api/messages',
+  auth(),
+  rateLimit(30, 60 * 1000),
+  body('recipientId').isMongoId(),
+  body('body').trim().notEmpty().isLength({ max: 2000 }),
+  asyncRoute(async (req: AuthRequest, res) => {
+    if (!valid(req, res)) return;
+
+    const ids = await authorizedContactIds(
+      req.user!.role,
+      req.user!.id
+    );
+
+    if (!ids.includes(req.body.recipientId)) {
+      return res.status(403).json({
+        message: 'لا يمكنك مراسلة هذا الحساب'
+      });
+    }
+
+    const message = await Message.create({
+      senderId: req.user!.id,
+      recipientId: req.body.recipientId,
+      body: req.body.body
+    });
+
+    await notify(
+      req.body.recipientId,
+      'رسالة جديدة',
+      req.body.body.slice(0, 120),
+      'MESSAGE'
+    );
+
+    res.status(201).json(message);
+  })
+);
+
+app.get(
+  '/api/notifications',
+  auth(),
+  asyncRoute(async (req: AuthRequest, res) =>
+    res.json(
+      await Notification.find({
+        userId: req.user!.id
+      })
+        .sort('-createdAt')
+        .limit(30)
+        .lean()
+    )
+  )
+);
+
+app.patch(
+  '/api/notifications/:id/read',
+  auth(),
+  asyncRoute(async (req: AuthRequest, res) => {
+    if (!validId(req.params.id as string)) {
+      return res.status(400).json({
+        message: 'معرف غير صالح'
+      });
+    }
+
+    const notification = await Notification.findOneAndUpdate(
+      {
+        _id: req.params.id as string,
+        userId: req.user!.id
+      },
+      {
+        readAt: new Date()
+      },
+      {
+        new: true
+      }
+    );
+
+    if (!notification) {
+      return res.status(404).json({
+        message: 'غير موجود'
+      });
+    }
+
+    res.json(notification);
+  })
+);
+
+app.get(
+  '/api/memorizations/me',
+  auth(['STUDENT', 'GUARDIAN']),
+  asyncRoute(async (req: AuthRequest, res) => {
+    const student =
+      req.user!.role === 'STUDENT'
+        ? await Student.findOne({
+            userId: req.user!.id
+          })
+        : await resolveGuardianStudent(
+            req.user!.id,
+            req.query.studentId as string
+          );
+
+    if (!student) return res.json([]);
+
+    const [memos, reviews] = await Promise.all([
+      Memorization.find({
+        studentId: student._id
+      })
+        .sort('-createdAt')
+        .lean(),
+
+      Review.find({
+        studentId: student._id
+      })
+        .sort('-scheduledFor')
+        .lean()
+    ]);
+
+    const surahNumbers = [
+      ...new Set([
+        ...memos.map((r) => r.surahNumber),
+        ...reviews.map((r) => r.surahNumber)
+      ])
+    ];
+
+    const surahs = await Surah.find({
+      number: { $in: surahNumbers }
+    }).lean();
+
+    const names = new Map(
+      surahs.map((s) => [s.number, s.nameAr])
+    );
+
+    res.json([
+      ...memos.map((r) => ({
+        ...r,
+        kind: 'MEMORIZATION',
+        surahName: names.get(r.surahNumber)
+      })),
+
+      ...reviews.map((r) => ({
+        ...r,
+        kind: 'REVIEW',
+        status: r.completedAt ? 'مكتملة' : 'مجدولة',
+        surahName: names.get(r.surahNumber)
+      }))
+    ]);
+  })
+);
+
+app.get(
+  '/api/memorizations',
+  auth(['SHEIKH']),
+  asyncRoute(async (req: AuthRequest, res) => {
+    const mine = await Student.find({
+      sheikhId: req.user!.id
+    })
+      .populate('userId', 'fullName')
+      .lean();
+
+    const nameMap = new Map(
+      mine.map((s) => [
+        String(s._id),
+        (s.userId as any)?.fullName
+      ])
+    );
+
+    const ids = mine.map((x) => x._id);
+
+    const [memos, reviews] = await Promise.all([
+      Memorization.find({
+        studentId: { $in: ids }
+      })
+        .sort('-createdAt')
+        .lean(),
+
+      Review.find({
+        studentId: { $in: ids }
+      })
+        .sort('-scheduledFor')
+        .lean()
+    ]);
+
+    const surahNumbers = [
+      ...new Set([
+        ...memos.map((r) => r.surahNumber),
+        ...reviews.map((r) => r.surahNumber)
+      ])
+    ];
+
+    const surahs = await Surah.find({
+      number: { $in: surahNumbers }
+    }).lean();
+
+    const surahNames = new Map(
+      surahs.map((s) => [s.number, s.nameAr])
+    );
+
+    res.json([
+      ...memos.map((r) => ({
+        ...r,
+        kind: 'MEMORIZATION',
+        surahName: surahNames.get(r.surahNumber),
+        studentName: nameMap.get(String(r.studentId))
+      })),
+
+      ...reviews.map((r) => ({
+        ...r,
+        kind: 'REVIEW',
+        status: r.completedAt ? 'مكتملة' : 'مجدولة',
+        surahName: surahNames.get(r.surahNumber),
+        studentName: nameMap.get(String(r.studentId))
+      }))
+    ]);
+  })
+);
+
+app.get(
+  '/api/evaluations',
+  auth(),
+  asyncRoute(async (req: AuthRequest, res) => {
+    const role = req.user!.role;
+
+    if (role === 'STUDENT' || role === 'GUARDIAN') {
+      const student =
+        role === 'STUDENT'
+          ? await Student.findOne({
+              userId: req.user!.id
+            })
+          : await resolveGuardianStudent(
+              req.user!.id,
+              req.query.studentId as string
+            );
+
+      if (!student) return res.json([]);
+
+      const memos = await Memorization.find({
+        studentId: student._id
+      }).distinct('_id');
+
+      return res.json(
+        await Evaluation.find({
+          memorizationId: { $in: memos }
+        })
+          .sort('-evaluatedAt')
+          .lean()
+      );
+    }
+
+    const evals = await Evaluation.find({
+      sheikhId: req.user!.id
+    })
+      .sort('-evaluatedAt')
+      .limit(100)
+      .lean();
+
+    const memos = await Memorization.find({
+      _id: { $in: evals.map((e) => e.memorizationId) }
+    }).lean();
+
+    const memoMap = new Map(
+      memos.map((m) => [String(m._id), m])
+    );
+
+    const studentIds = [
+      ...new Set(
+        memos.map((m) => String(m.studentId))
+      )
+    ];
+
+    const students = await Student.find({
+      _id: { $in: studentIds }
+    })
+      .populate('userId', 'fullName')
+      .lean();
+
+    const studentMap = new Map(
+      students.map((s) => [
+        String(s._id),
+        (s.userId as any)?.fullName
+      ])
+    );
+
+    const surahs = await Surah.find({
+      number: {
+        $in: memos.map((m) => m.surahNumber)
+      }
+    }).lean();
+
+    const surahNames = new Map(
+      surahs.map((s) => [s.number, s.nameAr])
+    );
+
+    res.json(
+      evals.map((e) => {
+        const m = memoMap.get(
+          String(e.memorizationId)
+        );
+
+        return {
+          ...e,
+          surahName: m
+            ? surahNames.get(m.surahNumber)
+            : undefined,
+          studentName: m
+            ? studentMap.get(String(m.studentId))
+            : undefined
+        };
+      })
+    );
+  })
+);
+
+app.get(
+  '/api/messages',
+  auth(),
+  asyncRoute(async (req: AuthRequest, res) => {
+    const me = req.user!.id;
+    const withId = req.query.with as string | undefined;
+
+    const filter =
+      withId && validId(withId)
+        ? {
+            $or: [
+              {
+                senderId: me,
+                recipientId: withId
+              },
+              {
+                senderId: withId,
+                recipientId: me
+              }
+            ]
+          }
+        : {
+            $or: [
+              { senderId: me },
+              { recipientId: me }
+            ]
+          };
+
+    res.json(
+      await Message.find(filter)
+        .sort('createdAt')
+        .limit(200)
+        .lean()
+    );
+  })
+);
+
+app.get(
+  '/api/contacts',
+  auth(),
+  asyncRoute(async (req: AuthRequest, res) => {
+    const ids = await authorizedContactIds(
+      req.user!.role,
+      req.user!.id
+    );
+
+    const users = await User.find({
+      _id: { $in: ids }
+    })
+      .select('fullName role email')
+      .lean();
+
+    res.json(users);
+  })
+);
+
+app.get(
+  '/api/certificates',
+  auth(),
+  asyncRoute(async (req: AuthRequest, res) => {
+    const student =
+      req.user!.role === 'GUARDIAN'
+        ? await resolveGuardianStudent(
+            req.user!.id,
+            req.query.studentId as string
+          )
+        : await Student.findOne({
+            userId: req.user!.id
+          });
+
+    if (!student) return res.json([]);
+
+    res.json(
+      await Certificate.find({
+        studentId: student._id
+      })
+        .sort('-issuedAt')
+        .lean()
+    );
+  })
+);
+
+app.post(
+  '/api/students',
+  auth(['SHEIKH']),
+  body('fullName').trim().notEmpty(),
+  body('email').isEmail(),
+  body('password').isLength({ min: 8 }),
+  asyncRoute(async (req: AuthRequest, res) => {
+    if (!valid(req, res)) return;
+
+    const {
+      fullName,
+      email,
+      password
+    } = req.body;
+
+    if (await User.exists({ email })) {
+      return res.status(409).json({
+        message: 'البريد مستخدم مسبقًا'
+      });
+    }
+
+    const user = await User.create({
+      fullName,
+      email,
+      passwordHash: await bcrypt.hash(password, 12),
+      role: 'STUDENT'
+    });
+
+    const student = await Student.create({
+      userId: user._id,
+      sheikhId: req.user!.id
+    });
+
+    res.status(201).json({
+      id: student.id,
+      user: {
+        id: user.id,
+        fullName: user.fullName,
+        email: user.email
+      }
+    });
+  })
+);
+
+app.post(
+  '/api/certificates/:memorizationId',
+  auth(['SHEIKH']),
+  asyncRoute(async (req: AuthRequest, res) => {
+    if (!validId(req.params.memorizationId as string)) {
+      return res.status(400).json({
+        message: 'معرف غير صالح'
+      });
+    }
+
+    const m = await Memorization.findById(
+      req.params.memorizationId as string
+    );
+
+    if (!m) {
+      return res.status(404).json({
+        message: 'الدرس غير موجود'
+      });
+    }
+
+    const [
+      student,
+      surah,
+      evaluation
+    ] = await Promise.all([
+      Student.findById(m.studentId).populate(
+        'userId',
+        'fullName'
+      ),
+
+      Surah.findOne({
+        number: m.surahNumber
+      }),
+
+      Evaluation.findOne({
+        memorizationId: m._id
+      }).sort('-evaluatedAt')
+    ]);
+
+    if (!student || !surah) {
+      return res.status(404).json({
+        message: 'بيانات الشهادة غير مكتملة'
+      });
+    }
+
+    if (String(student.sheikhId) !== req.user!.id) {
+      return res.status(403).json({
+        message: 'الطالب غير مرتبط بشيخ'
+      });
+    }
+
+    const dir =
+      process.env.CERTIFICATE_STORAGE ||
+      'uploads/certificates';
+
+    const file = `certificate-${m.id}.pdf`;
+
+    const doc = new PDFDocument({
+      size: 'A4',
+      layout: 'landscape',
+      margin: 55
+    });
+
+    fs.mkdirSync(dir, {
+      recursive: true
+    });
+
+    doc
+      .pipe(
+        fs.createWriteStream(
+          path.join(dir, file)
+        )
+      );
+
+    doc
+      .rect(18, 18, 806, 559)
+      .lineWidth(3)
+      .stroke('#D4AF37');
+
+    doc
+      .fillColor('#1A6B4F')
+      .fontSize(34)
+      .text(
+        'شهادة إنجاز',
+        0,
+        100,
+        { align: 'center' }
+      );
+
+    doc
+      .fillColor('#263c34')
+      .fontSize(19)
+      .text(
+        `نشهد بأن الطالب/ة ${(student.userId as any).fullName}`,
+        0,
+        190,
+        { align: 'center' }
+      );
+
+    doc
+      .fontSize(16)
+      .text(
+        `قد أتم حفظ ${surah.nameAr} بتقييم ${evaluation?.score || 0}/100`,
+        0,
+        235,
+        { align: 'center' }
+      );
+
+    doc.end();
+
+    const certificate = await Certificate.create({
+      studentId: student._id,
+      surahNumber: surah.number,
+      score: evaluation?.score,
+      filePath: file
+    });
+
+    res.status(201).json({
+      certificate,
+      url: `/certificates/${file}`
+    });
+  })
+);
+
+app.post(
+  '/api/announcements',
+  auth(['SHEIKH']),
+  body('title').trim().notEmpty(),
+  body('body').trim().notEmpty().isLength({ max: 1000 }),
+  asyncRoute(async (req: AuthRequest, res) => {
+    if (!valid(req, res)) return;
+
+    const students = await Student.find({
+      sheikhId: req.user!.id
+    });
+
+    await Promise.all(
+      students.map((s) =>
+        notify(
+          String(s.userId),
+          req.body.title,
+          req.body.body,
+          'ANNOUNCEMENT'
+        )
+      )
+    );
+
+    res.status(201).json({
+      sent: students.length
+    });
+  })
+);
+
+cron.schedule(
+  '0 9 */3 * *',
+  async () => {
+    const ids = await Review.find({
+      completedAt: null,
+      scheduledFor: {
+        $lte: new Date()
+      }
+    }).distinct('studentId');
+
+    const students = await Student.find({
+      _id: { $in: ids }
+    });
+
+    await Promise.all(
+      students.map((s) =>
+        notify(
+          String(s.userId),
+          'تذكير بالمراجعة',
+          'لديك مراجعة مستحقة اليوم',
+          'REVIEW_REMINDER'
+        )
+      )
+    );
+  }
+);
+
+app.use(
+  (
+    err: any,
+    _q: Request,
+    res: Response,
+    _n: NextFunction
+  ) => {
+    console.error(err);
+    res.status(500).json({
+      message: 'حدث خطأ غير متوقع'
+    });
+  }
+);
+
+const uri = process.env.MONGODB_URI;
+
+if (!uri) {
+  throw new Error('MONGODB_URI is required.');
+}
+
+mongoose
+  .connect(uri)
+  .then(() =>
+    server.listen(
+      port,
+      () =>
+        console.log(
+          `Rifqah API: http://localhost:${port}`
+        )
+    )
+  )
+  .catch((err) => {
+    console.error(
+      'MongoDB connection failed:',
+      err.message
+    );
+    process.exit(1);
+  });
