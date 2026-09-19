@@ -1,354 +1,215 @@
-````markdown
-# 🕌 رِفقة القرآن | Rifqah Quran
+# 🕌 Rifqah Quran
 
-> **رفقة في رحلتك مع القرآن**
+**رفيقك في رحلتك مع القرآن الكريم**
 
-منصة إلكترونية حديثة تهدف إلى تسهيل إدارة ومتابعة رحلة حفظ القرآن الكريم، من خلال توفير بيئة رقمية تجمع بين الطلاب والمعلمين والإدارة في نظام واحد متكامل.
+منصة إلكترونية متكاملة لإدارة ومتابعة رحلة حفظ القرآن الكريم، تربط بين الطلاب والمشرفين، وتوفر أدوات لمتابعة الحفظ والتقييمات والشهادات والإشعارات.
 
-توفر المنصة مجموعة من الأدوات لإدارة الطلاب والمعلمين، متابعة الحفظ والتقدم، تسجيل التقييمات، إرسال الإشعارات والرسائل، وإدارة محتوى القرآن الكريم.
-
----
-
-## 🌐 الموقع الرسمي
-
-🔗 https://rifqah-quran.vercel.app/
+🌐 **Live Demo:** [https://rifqah-quran.vercel.app/](https://rifqah-quran.vercel.app/)
 
 ---
 
-## ✨ أهم المميزات
+## ✨ Features
 
-- 🔐 تسجيل الدخول وإنشاء الحسابات
-- 👥 إدارة الطلاب والمعلمين
-- 👨‍💼 لوحة تحكم للإدارة
-- 📖 إدارة سور القرآن الكريم
-- 🧠 متابعة حفظ القرآن
-- 📊 متابعة مستوى وتقدم الطلاب
-- 📝 تسجيل تقييمات الطلاب
-- 🔔 نظام الإشعارات
-- 💬 نظام الرسائل والتواصل
-- 📜 إدارة الشهادات
-- 🔄 التواصل الفوري باستخدام Socket.IO
-- 📱 واجهة متجاوبة مع الموبايل والتابلت والكمبيوتر
-- 🛡️ نظام صلاحيات وحماية للمستخدمين
+* 👤 نظام تسجيل دخول وحسابات للمستخدمين
+* 📖 إدارة ومتابعة حفظ القرآن الكريم
+* 📝 تسجيل التقييمات والمتابعة الدورية
+* 🏆 إصدار ومتابعة الشهادات
+* 🔔 نظام الإشعارات
+* 💬 نظام الرسائل والتواصل
+* 👨‍🏫 إدارة الطلاب والمشرفين
+* 📊 Dashboard لمتابعة الأداء
+* 🔐 Authentication و Role-Based Access
+* 📱 تصميم Responsive لجميع الأجهزة
 
 ---
 
-## 🏗️ التقنيات المستخدمة
+## 🛠️ Tech Stack
 
-### الواجهة الأمامية
+### Frontend
 
-- React
-- TypeScript
-- Vite
-- HTML5
-- CSS3
+* React
+* TypeScript
+* Vite
+* Tailwind CSS
+* Recharts
 
-### الخادم والـ API
-
-- Node.js
-- Express.js
-- TypeScript
-- Mongoose
-- JWT
-- Socket.IO
-- Node-Cron
-
-### قاعدة البيانات
-
-- MongoDB
-- MongoDB Atlas
-
-### الاستضافة
-
-- Vercel — الواجهة الأمامية
-- Railway / Cloud Infrastructure — الخادم
-- MongoDB Atlas — قاعدة البيانات
-
----
-
-## 📂 هيكل المشروع
-
-```text
-rifqah-quran/
-│
-├── client/                 # الواجهة الأمامية
-│   ├── public/
-│   └── src/
-│
-├── server/                 # الخادم والـ API
-│   ├── src/
-│   └── package.json
-│
-├── .gitignore
-└── README.md
-````
-
----
-
-## 🚀 تشغيل المشروع محليًا
-
-### المتطلبات
-
-قبل تشغيل المشروع تأكد من تثبيت:
+### Backend
 
 * Node.js
-* npm
-* Git
-* MongoDB أو حساب MongoDB Atlas
+* Express.js
+* TypeScript
+* Socket.IO
+
+### Database
+
+* MongoDB
+* Mongoose
+
+### Authentication & Security
+
+* JWT
+* bcryptjs
+* Express Validator
+* CORS
+
+### Deployment
+
+* Vercel
+* Railway
+* MongoDB Atlas
 
 ---
 
-## 🔧 تثبيت المشروع
+## 📁 Project Structure
 
-استنساخ المشروع:
+rifqah-quran/
+│
+├── client/          # Frontend - React + Vite
+│
+├── server/          # Backend - Node.js + Express
+│
+├── .gitignore
+├── README.md
+└── package.json
 
-```bash
-git clone https://github.com/MohamedRabie2282/rifqah-quran.git
-```
+---
 
-الدخول إلى المشروع:
+## 🏗️ Architecture
 
-```bash
+Frontend
+React + TypeScript
+↓
+REST API / Socket.IO
+↓
+Node.js + Express
+↓
+Mongoose
+↓
+MongoDB Atlas
+
+---
+
+## 🚀 Run Locally
+
+### 1. Clone Repository
+
+git clone [https://github.com/MohamedRabie2282/rifqah-quran.git](https://github.com/MohamedRabie2282/rifqah-quran.git)
+
 cd rifqah-quran
-```
 
----
+### 2. Install Frontend
 
-## 💻 تشغيل الواجهة الأمامية
-
-```bash
 cd client
+
 npm install
+
+### 3. Start Frontend
+
 npm run dev
-```
 
----
+### 4. Install Backend
 
-## ⚙️ تشغيل الخادم
+cd ../server
 
-افتح Terminal جديد:
-
-```bash
-cd server
 npm install
-npm run dev
-```
 
----
+### 5. Configure Environment Variables
 
-## 🔐 متغيرات البيئة
+Create a `.env` file inside the `server` folder:
 
-قم بإنشاء ملف:
-
-```text
-server/.env
-```
-
-وأضف المتغيرات المطلوبة:
-
-```env
-NODE_ENV=development
-PORT=4000
-CLIENT_URL=http://localhost:5173
 MONGODB_URI=your_mongodb_connection_string
+
 JWT_SECRET=your_jwt_secret
-```
 
-> ⚠️ لا تقم برفع ملف `.env` إلى GitHub، ولا تشارك بيانات قاعدة البيانات أو مفاتيح التشفير مع أي شخص.
+CLIENT_URL=[http://localhost:5173](http://localhost:5173)
 
----
+NODE_ENV=development
 
-## 👤 أنواع المستخدمين
+PORT=4000
 
-يدعم النظام عدة مستويات من الصلاحيات، منها:
+### 6. Start Backend
 
-```text
-Admin
-Teacher
-Student
-```
-
-ويتم تحديد الصلاحيات وفقًا لدور المستخدم داخل النظام.
+npm run dev
 
 ---
 
-## 🗄️ قاعدة البيانات
+## 👥 User Roles
 
-يعتمد المشروع على MongoDB لإدارة البيانات باستخدام Mongoose.
+### 👨‍💼 Admin
 
-ومن أهم مجموعات البيانات:
-
-```text
-users
-students
-surahs
-memorizations
-evaluations
-notifications
-messages
-certificates
-reviews
-```
-
----
-
-## 🔌 واجهة API
-
-يوفر الخادم REST API للتعامل مع الوظائف المختلفة في النظام، مثل:
-
-* المصادقة وتسجيل الدخول
 * إدارة المستخدمين
 * إدارة الطلاب
-* إدارة سور القرآن
+* متابعة النظام
+* إدارة المحتوى
+
+### 👨‍🏫 Supervisor
+
+* متابعة الطلاب
+* تسجيل التقييمات
 * متابعة الحفظ
-* التقييمات
-* الإشعارات
-* الرسائل
-* الشهادات
+* التواصل مع الطلاب
+
+### 👨‍🎓 Student
+
+* متابعة الحفظ
+* مشاهدة التقييمات
+* متابعة التقدم
+* استقبال الإشعارات
+* التواصل مع المشرف
 
 ---
 
-## 🏛️ بنية النظام
+## 🔐 Security
 
-```text
-                  👥 المستخدمون
-                       │
-                       ▼
-              ┌─────────────────┐
-              │ React Frontend  │
-              │      Vite       │
-              └────────┬────────┘
-                       │
-                       │ REST API
-                       ▼
-              ┌─────────────────┐
-              │ Node.js +       │
-              │ Express.js      │
-              └────────┬────────┘
-                       │
-              ┌────────┴────────┐
-              │                 │
-              ▼                 ▼
-       ┌──────────────┐  ┌──────────────┐
-       │   MongoDB    │  │   Socket.IO  │
-       │    Atlas     │  │  Real-time   │
-       └──────────────┘  └──────────────┘
-```
+* JWT Authentication
+* Password Hashing باستخدام bcrypt
+* Role-Based Authorization
+* Input Validation
+* Protected API Routes
+* CORS Configuration
+* Environment Variables لحماية البيانات الحساسة
 
 ---
 
-## 🛡️ الأمان
+## 🎯 Project Goals
 
-تم تصميم النظام مع مراعاة أساسيات أمن تطبيقات الويب، ومنها:
-
-* 🔐 المصادقة باستخدام JWT
-* 🔑 تشفير كلمات المرور باستخدام bcrypt
-* 👮 التحكم في صلاحيات المستخدمين
-* 🔒 حماية المسارات الحساسة
-* 🛡️ التحقق من البيانات على الخادم
-* 🌐 إعداد CORS
-* 🔐 استخدام متغيرات البيئة لحماية المعلومات الحساسة
-
-> يتم إجراء اختبارات الأمان فقط على الأنظمة والبيئات المصرح باختبارها.
+يهدف المشروع إلى توفير تجربة رقمية سهلة ومنظمة لمتابعة حفظ القرآن الكريم، وتقليل الاعتماد على المتابعة اليدوية، مع توفير رؤية واضحة لتقدم الطالب ومستواه.
 
 ---
 
-## 📱 التصميم المتجاوب
+## 🔮 Future Improvements
 
-تم تصميم المنصة للعمل على مختلف الأجهزة:
-
-* 💻 أجهزة الكمبيوتر
-* 🖥️ أجهزة اللابتوب
-* 📱 الهواتف المحمولة
-* 📟 الأجهزة اللوحية
-
----
-
-## 🎯 أهداف المشروع
-
-يهدف مشروع **رِفقة القرآن** إلى:
-
-* تسهيل إدارة حلقات حفظ القرآن الكريم.
-* تنظيم بيانات الطلاب والمعلمين.
-* متابعة تقدم الطلاب في الحفظ.
-* تسجيل ومتابعة التقييمات.
-* تحسين التواصل بين الطلاب والمعلمين.
-* توفير نظام مركزي لإدارة بيانات حفظ القرآن.
-* تقديم تجربة رقمية سهلة ومنظمة للمستخدمين.
+* 📱 Mobile Application
+* 🤖 AI-based Quran Recitation Analysis
+* 🎙️ Voice Recognition
+* 📈 Advanced Analytics
+* 🕌 Multi-Mosque Support
+* 🌍 Multi-language Support
+* ☁️ Improved Cloud Infrastructure
 
 ---
 
-## 🔮 التطويرات المستقبلية
-
-من التطويرات المستقبلية المقترحة:
-
-* 📱 تحويل المنصة إلى Progressive Web App
-* 📊 إضافة إحصائيات وتقارير متقدمة
-* 🤖 استخدام الذكاء الاصطناعي لتحليل تقدم الطلاب
-* 🎙️ تحليل تلاوة القرآن الكريم
-* 📅 نظام متقدم لإدارة الجداول والمواعيد
-* 📧 إرسال إشعارات عبر البريد الإلكتروني
-* 🔔 دعم Push Notifications
-* 🌍 دعم لغات متعددة
-* ☁️ تحسين البنية السحابية وقابلية التوسع
-
----
-
-## 🤝 المساهمة في المشروع
-
-نرحب بالاقتراحات والمساهمات التي تساعد على تطوير المشروع.
-
-يمكنك إنشاء نسخة من المشروع ثم إنشاء فرع جديد:
-
-```bash
-git fork
-git clone
-git checkout -b feature/new-feature
-```
-
-بعد الانتهاء من التعديلات:
-
-```bash
-git add .
-git commit -m "Add new feature"
-git push
-```
-
-ثم قم بإنشاء Pull Request.
-
----
-
-## 📄 الترخيص
-
-المشروع حاليًا مشروع شخصي وتتم إدارته بواسطة صاحب المشروع.
-
-يرجى التواصل مع صاحب المشروع قبل إعادة استخدام أو توزيع الكود المصدري.
-
----
-
-## 👨‍💻 المطور
+## 👨‍💻 Developer
 
 **Mohamed Rabie**
 
-مهتم بتطوير البرمجيات والأمن السيبراني واختبار الاختراق.
+Junior Penetration Tester & Software Developer
 
 GitHub:
-
 [https://github.com/MohamedRabie2282](https://github.com/MohamedRabie2282)
 
 ---
 
-## ⭐ دعم المشروع
+## 🤝 Support
 
-إذا أعجبك المشروع أو وجدته مفيدًا، يمكنك دعم المشروع من خلال وضع ⭐ على مستودع GitHub.
+إذا أعجبك المشروع، يمكنك دعم المشروع من خلال ⭐ Star على GitHub.
 
 ---
 
-# 🕌 رِفقة القرآن
+<div align="center">
 
-### رفيقك في رحلة حفظ القرآن الكريم 🤍
+🕌 **رِفقة في رحلتك مع القرآن**
 
-> **"رفقة في رحلتك مع القرآن"**
+**A Companion on Your Quran Journey**
 
-```
-```
+</div>
